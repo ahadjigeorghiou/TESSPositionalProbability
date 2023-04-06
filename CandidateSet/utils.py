@@ -12,22 +12,16 @@ from requests.exceptions import ConnectionError
 import matplotlib.pyplot as plt
     
 
-def load_default(infile, env):
-    
-    if env == 'NGTS':
-        filepath = Path('/tess/photometry/tessFFIextract/lightcurves')
-    elif env == 'jeepers':
-        filepath = Path('/home/andreash/Projects/RAVEN/Lightcurves')
-    elif env == 'win':
-        filepath = Path("D:") / 'RAVEN' / 'Lightcurves'
-    elif env == 'default':
-        filepath = Path(__file__).resolve().parents[1] / 'Lightcurves'
+def load_default(infile, lc_dir, per_lim=None, depth_lim=None):
+    if lc_dir == 'default':
+        filepath = Path(__file__).resolve().parents[1] / 'Lightcurves' 
     else:
-        filepath = Path(env)
+        filepath = Path(lc_dir)
     
-    # Default data should be a csv file with ticid, toi, per, t0, tdur, depth in this order
-    data = pd.read_csv(f'Input/{infile}').set_index(['ticid', 'candidate'])
-    data.columns = ['ticid', 'candidate', 'per', 't0', 'depth']
+    # Default data should be a csv file with ticid, toi/candidate num, per, t0, tdur, depth in this order
+    data = pd.read_csv(f'Input/{infile}')
+    data.columns = ['ticid', 'candidate', 'per', 't0', 'tdur', 'depth']
+    data.set_index(['ticid', 'candidate'], inplace=True)
     data['lcdir'] = [filepath / str(ticid) for ticid in data.index.get_level_values('ticid')]
     
     data.loc[data['t0'] > 2457000, 't0'] -= 2457000
@@ -52,17 +46,11 @@ def load_default(infile, env):
 
     return data
 
-def load_archive_tois(infile, env, per_lim=None, depth_lim=None):
-    if env == 'NGTS':
-        filepath = Path('/tess/photometry/tessFFIextract/lightcurves/SPOC TOI')
-    elif env == 'jeepers':
-        filepath = Path('/home/andreash/Projects/RAVEN/Lightcurves/SPOC TOI')
-    elif env == 'win':
-        filepath = Path("D:/RAVEN/Lightcurves/SPOC TOI")
-    elif env == 'default':
-        filepath = Path(__file__).resolve().parents[1] / 'Lightcurves' / 'SPOC TOI'
+def load_archive_toi(infile, lc_dir, per_lim=None, depth_lim=None):
+    if lc_dir == 'default':
+        filepath = Path(__file__).resolve().parents[1] / 'Lightcurves'   
     else:
-        filepath = Path(env)
+        filepath = Path(lc_dir)
         
     cols = ['toi', 'tid', 'tfopwg_disp', 'pl_tranmid', 'pl_orbper', 'pl_trandurh', 'pl_trandep']
     
@@ -114,21 +102,15 @@ def load_archive_tois(infile, env, per_lim=None, depth_lim=None):
     return toi_df
 
 
-def load_exofop_tois(infile, env, per_lim=None, depth_lim=None):
-    if env == 'NGTS':
-        filepath = Path('/tess/photometry/tessFFIextract/lightcurves/SPOC TOI')
-    elif env == 'jeepers':
-        filepath = Path('/home/andreash/Projects/RAVEN/Lightcurves/SPOC TOI')
-    elif env == 'win':
-        filepath = Path("D:/RAVEN/Lightcurves/SPOC TOI")
-    elif env == 'default':
-        filepath = Path(__file__).resolve().parents[1] / 'Lightcurves' / 'SPOC TOI'
+def load_exofop_toi(infile, lc_dir, per_lim=None, depth_lim=None):
+    if lc_dir == 'default':
+        filepath = Path(__file__).resolve().parents[1] / 'Lightcurves'   
     else:
-        filepath = Path(env)
+        filepath = Path(lc_dir)
         
     cols = ['TIC ID', 'TOI', 'TESS Disposition', 'TFOPWG Disposition', 'Transit Epoch (BJD)', 'Period (days)', 'Duration (hours)', 'Depth (ppm)']
     
-    toi_df = pd.read_csv(Path.cwd() / 'Input' / infile, usecols=cols)
+    toi_df = pd.read_csv(Path(__file__).resolve().parents[1] / 'Input' / infile, usecols=cols)
     
     toi_df.columns = ['ticid', 'candidate', 'tess_disp', 'tfop_disp', 't0', 'per', 'tdur', 'depth']
     
@@ -174,38 +156,36 @@ def load_exofop_tois(infile, env, per_lim=None, depth_lim=None):
     return toi_df
 
 
+def TIC_byID(ID):
+    """
+    """
+    try:
+        catTable = Catalogs.query_criteria(ID=ID, catalog="Tic")
+        
+        return catTable['ID', 'ra', 'dec', 'Tmag', 'e_Tmag', 'GAIAmag', 'e_GAIAmag', 'Vmag', 'e_Vmag']
+    except ConnectionError:
+        print('Connection failed. Source not created.')
+        return 0
+
+
 def TIC_lookup(coords, search_radius=0.05555):
     """
     """
     scoord = SkyCoord(ra=coords[0], dec=coords[1], unit='deg', frame='icrs')
     radius = u.Quantity(search_radius, u.deg)
-    # print(str(coords[0].data.data[0])+' '+str(coords[1].data.data[0]))
 
     try:
         catTable = Catalogs.query_region(scoord, catalog="Tic", radius=radius) 
         
-        return catTable['ID', 'ra', 'dec', 'rad', 'mass', 'Teff', 'Tmag', 'disposition']
+        return catTable['ID', 'ra', 'dec', 'rad', 'mass', 'Teff', 'Tmag', 'GAIAmag', 'Vmag', 'disposition']
     except ConnectionError:
         print('Connection error. Nearby sources not found.')
         return 0
 
 
-def TIC_byID(ID):
-    """
-    """
-
-    try:
-        catTable = Catalogs.query_criteria(ID=ID, catalog="Tic")
-        
-        return catTable['ID', 'ra', 'dec', 'Tmag', 'e_Tmag']
-    except ConnectionError:
-        print('Connection failed. Source not created.')
-        return 0
-    
-
 def load_spoc_centroid(filepath, flatten=False, trim=False, cut_outliers=False, sectorstart=None, transitcut=False, tc_per=None, tc_t0=None, tc_tdur=None):
     """
-    Loads TESS SSC lightcurve centroid data
+    Loads TESS SPOC lightcurve centroid data
     """
     flag = ''
     
@@ -275,10 +255,10 @@ def load_spoc_centroid(filepath, flatten=False, trim=False, cut_outliers=False, 
 
         X = tsf.TESSflatten(Xcurve, sectorstart=sectorstart, split=True, winsize=2, stepsize=0.15, polydeg=3,
                             niter=10, sigmaclip=4., gapthresh=100., transitcut=transitcut,
-                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False, centroid=False)
+                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False)
         Y = tsf.TESSflatten(Ycurve, sectorstart=sectorstart, split=True, winsize=2, stepsize=0.15, polydeg=3,
                             niter=10, sigmaclip=4., gapthresh=100., transitcut=transitcut,
-                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False, centroid=False)
+                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False)
         
     if cut_outliers:
 
@@ -316,9 +296,9 @@ def load_spoc_centroid(filepath, flatten=False, trim=False, cut_outliers=False, 
     return time, X, Y, flag, cam, ccd
 
 
-def TESSload(filepath, hdu=None, flatten=False,  sectorstart=None, transitcut=False, tc_per=None, tc_t0=None, tc_tdur=None, return_trend=False, return_hdu=False):
+def load_spoc_lc(filepath, hdu=None, flatten=False,  sectorstart=None, transitcut=False, tc_per=None, tc_t0=None, tc_tdur=None, return_trend=False, return_hdu=False):
     """
-    Loads a TESS lightcurve, normalised with NaNs removed.
+    Loads a TESS SPOC lightcurve, normalised with NaNs removed.
  
     Returns:
     lc -- 	dict
@@ -398,7 +378,7 @@ def TESSload(filepath, hdu=None, flatten=False,  sectorstart=None, transitcut=Fa
         return lc
          
          
-def load_spoc_masks(filepath, background=False):
+def load_spoc_masks(filepath):
     hdu = fits.open(filepath)
     wcs = WCS(hdu[2].header)
     mask_data = hdu[2].data
@@ -412,15 +392,9 @@ def load_spoc_masks(filepath, background=False):
     aperture = np.bitwise_and(mask_data, 2) / 2
     centroid = np.bitwise_and(mask_data, 8) / 8
     
-    if background:
-        background = np.bitwise_and(mask_data, 4) / 4
-        hdu.close()
-        del hdu
-        return aperture, centroid, wcs, origin, cam, ccd, background
-    else:
-        hdu.close()
-        del hdu
-        return aperture, centroid, wcs, origin, cam, ccd
+    hdu.close()
+    del hdu
+    return aperture, centroid, wcs, origin, cam, ccd
 
 
 def phasefold(time, per, t0=0):
@@ -468,7 +442,7 @@ def observed_transits(time, t0, per, tdur):
     return count
 
 
-def centroid_fitting(time, X, Y, per, t0, tdur, tdur23, loss='linear', return_model=False): 
+def centroid_fitting(ticid, candidate, sector, time, X, Y, per, t0, tdur, tdur23, loss='linear', plot=False): 
     if per == 0:
         per = time[-1] - time[0]
         
@@ -501,25 +475,19 @@ def centroid_fitting(time, X, Y, per, t0, tdur, tdur23, loss='linear', return_mo
             return model   
 
         phase = phasefold(time,per, t0+per*0.5)  #transit at phase 0.5
-        
-        # initialguess = [tdur*0.9 / per, tdur / per, 0]
-        # bounds=[(initialguess[1]*0.01, initialguess[1]*0.95, -np.inf),(initialguess[1]*1.05, initialguess[1]*1.05, np.inf)]
-        
+        idx = np.argsort(phase)
+        phase = phase[idx]
+               
         initialguess = [tdur23 / per, tdur / per, 0]
         bounds=[(initialguess[0]*0.95, initialguess[1]*0.99, -np.inf),(initialguess[0]*1.05, initialguess[1]*1.01, np.inf)]
-        #bounds=[(initialguess[0]*0.99, initialguess[1]*0.99, -np.inf),(initialguess[0]*1.01, initialguess[1]*1.01, np.inf)]
-        
-        idx = np.argsort(phase)
-        phase2 = phase[idx] 
-
         
         try:
-            xfit = optimize.curve_fit(_Trapezoidmodel, phase, X, 
+            xfit = optimize.curve_fit(_Trapezoidmodel, phase, X[idx], 
                                     p0=initialguess, sigma=np.full_like(X, MAD(X[~intransit])),
                                     bounds=bounds,
                                     absolute_sigma=False, loss=loss)
                             
-            yfit = optimize.curve_fit(_Trapezoidmodel, phase, Y, 
+            yfit = optimize.curve_fit(_Trapezoidmodel, phase, Y[idx], 
                                     p0=initialguess, sigma=np.full_like(Y, MAD(Y[~intransit])),
                                     bounds=bounds,
                                     absolute_sigma=False, loss=loss)       
@@ -533,27 +501,29 @@ def centroid_fitting(time, X, Y, per, t0, tdur, tdur23, loss='linear', return_mo
                 x_diff, x_err, y_diff, y_err = np.nan, np.nan, np.nan, np.nan
                 flag = 'Fit did not converge'
             
-            modelX = _Trapezoidmodel(phase2, *xfit[0])
-            modelY = _Trapezoidmodel(phase2, *yfit[0])
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 10))
-            intransit_new = np.abs(phase2-0.5) <= tdur*0.5/per
-            limit = np.abs(phase2-0.5) < tdur*4/per
-            ax1.scatter(phase2[limit], X[idx][limit], s=0.5)
-            ax1.scatter(phase2[intransit_new], X[idx][intransit_new], s=0.5, c='r')
-            ax1.scatter(phase2[limit], modelX[limit], s=0.5, c='orange')
-            ax1.axhline(np.median(X[intransit_half]), c='green')
-            
-            ax2.scatter(phase2[limit], Y[idx][limit], s=0.5)
-            ax2.scatter(phase2[intransit_new], Y[idx][intransit_new], s=0.5, c='r')
-            ax2.scatter(phase2[limit], modelY[limit], s=0.5, c='orange')
-            ax2.axhline(np.median(Y[intransit_half]), c='green')
-            
-            fig.show()
-            
-            if return_model:
-                return phase2, modelX, modelY
-        
-        except Exception as e:
+            if plot:
+                modelX = _Trapezoidmodel(phase, *xfit[0])
+                modelY = _Trapezoidmodel(phase, *yfit[0])
+
+                phase -= 0.5
+                
+                limit = np.abs(phase) < tdur*4/per
+                
+                fig, ax = plt.subplots(1,1, figsize=(8,8))
+                fig.suptitle(f'TIC {ticid} - {candidate} Sector {sector}')
+                ax.scatter(phase[limit], X[idx][limit], s=0.5, c='k')
+                ax.plot(phase[limit], modelX[limit], c='darkorange', lw=2)
+                ax.scatter(phase[limit], Y[idx][limit] - 0.01, s=0.5, c='k')
+                ax.plot(phase[limit], modelY[limit]-0.01, c='darkorange', lw=2)
+                ax.set_xlabel('Phase', fontsize=14)
+                ax.set_ylabel('Normalized Centroid Position', fontsize=14)
+                
+                outfile = Path(__file__).resolve().parents[1] / 'Output' / 'Plots' / f'{ticid}' 
+                outfile.mkdir(exist_ok=True)
+                outfile = outfile / f'centroidfit_{ticid}_{candidate}_{sector}.png'
+                fig.savefig(outfile, bbox_inches='tight')
+                 
+        except Exception:
             x_diff, x_err, y_diff, y_err = np.nan, np.nan, np.nan, np.nan
             flag = 'Fit fail'
     else:
@@ -561,9 +531,6 @@ def centroid_fitting(time, X, Y, per, t0, tdur, tdur23, loss='linear', return_mo
     
     return x_diff, x_err, y_diff, y_err, flag
 
-
-
-        
 
 def nearby_depth(depth, f_t, f_n):
     depth_n = depth * np.divide(f_t, f_n, out=np.zeros_like(f_n), where=f_n!=0.0)
@@ -604,9 +571,9 @@ def calc_flux_fractions(sec, cam, ccd, origin, X_sources, Y_sources, fluxes, ape
     tp_y = np.round(origin[1] + Y_sources[0])
 
     if sec < 4:
-        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 1'
+        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 1'
     else:
-        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 4'
+        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 4'
                 
     prf = PRF.TESS_PRF(cam, ccd, sec, tp_x, tp_y, prf_folder)
     
@@ -625,48 +592,6 @@ def calc_flux_fractions(sec, cam, ccd, origin, X_sources, Y_sources, fluxes, ape
         flux_fractions.append(source_ap_flux/all_ap_flux)
         
     return flux_fractions, all_ap_flux  
-
-
-def prf_centroid(sec, cam, ccd, origin, X_sources, Y_sources, fluxes, aperture):
-    from CandidateSet import PRF
-    
-    # Identify the pixels used in the aperture
-    pixels = np.where(aperture == 1)
-
-    # Extract a 2x2 array of the mask grid. Pixels not used will retain 0 in their values.
-    y_min = np.min(pixels[0])
-    y_max = np.max(pixels[0]) + 1
-    
-    x_min = np.min(pixels[1])
-    x_max = np.max(pixels[1]) + 1
-    
-    aperture_only = aperture[y_min:y_max, x_min:x_max]
-    fluxfractions = np.zeros([X_sources.size, aperture.shape[0], aperture.shape[1]])
-    
-    tp_x = np.round(origin[0] + X_sources[0])
-    tp_y = np.round(origin[1] + Y_sources[0])
-
-    if sec < 4:
-        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 1'
-    else:
-        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 4'
-                
-    prf = PRF.TESS_PRF(cam, ccd, sec, tp_x, tp_y, prf_folder)
-    
-    for i in range(len(X_sources)):
-        fluxfractions[i] = prf.locate(X_sources[i], Y_sources[i], aperture.shape)   
-    
-    fluxfractions *= fluxes[:, None, None] #convert fractions to actual fluxes within each pixel (still by star)
-    fluxfractions = np.sum(fluxfractions, axis=0) #should now be 2D. All flux contributions in each pixel now totalled. Could be used for diagnostics, this array should now be a simulated image of the aperture.
-
-    fluxfractions = fluxfractions[y_min:y_max, x_min:x_max]
-    
-    fluxfractions *= aperture_only # Multiplies by either 1 or 0 if pixel is in the aperture mask or not
-    #need to specify indices in below two lines. Depends on format of aperture.
-    X = np.average(np.arange(x_min, x_max),weights=np.sum(fluxfractions,axis=0)) #sums fluxfractions across y axis to leave x behind
-    Y = np.average(np.arange(y_min, y_max),weights=np.sum(fluxfractions,axis=1)) #sums fluxfractions across x axis to leave y behind
-   
-    return X, Y
 
 
 def prf_fractions(sec, cam, ccd, origin, X_sources, Y_sources, aperture):
@@ -689,9 +614,9 @@ def prf_fractions(sec, cam, ccd, origin, X_sources, Y_sources, aperture):
     tp_y = np.round(origin[1] + Y_sources[0])
 
     if sec < 4:
-        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 1'
+        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 1'
     else:
-        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 4'
+        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 4'
                 
     prf = PRF.TESS_PRF(cam, ccd, sec, tp_x, tp_y, prf_folder)
     
@@ -701,7 +626,7 @@ def prf_fractions(sec, cam, ccd, origin, X_sources, Y_sources, aperture):
     return fluxfractions
 
 
-def centroid_shift(aperture, fluxes, fluxfractions):
+def model_centroid(aperture, fluxes, fluxfractions):
     # Identify the pixels used in the aperture
     pixels = np.where(aperture == 1)
 
@@ -724,7 +649,7 @@ def centroid_shift(aperture, fluxes, fluxfractions):
     return X, Y    
 
 
-def calc_centroid_probability_all(cent_x, cent_y, cent_x_err, cent_y_err, diff_x, diff_y, diff_x_err, diff_y_err):
+def calc_centroid_probability(cent_x, cent_y, cent_x_err, cent_y_err, diff_x, diff_y, diff_x_err, diff_y_err):
     X_err = np.sqrt(cent_x_err ** 2 + diff_x_err ** 2)
     Y_err = np.sqrt(cent_y_err ** 2 + diff_y_err ** 2)
     
