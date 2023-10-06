@@ -1,8 +1,7 @@
 import numpy as np
 from astropy.io import fits
-import sys
 import warnings
-from . import utils
+from CandidateSet import utils
 warnings.filterwarnings('once')
 
 
@@ -154,7 +153,7 @@ def CutTransits(time,flux,err,t0,per,tdur):
 
 def TESSflatten(lcurve, split=True, winsize=2.5, 
 				stepsize=0.15,polydeg=3,niter=10,sigmaclip=4.,gapthresh=100.,
-				sectorstart=0.,transitcut=False,tc_per=0,tc_t0=0,tc_tdur=0,divide=True, return_trend=False):
+				transitcut=False,tc_per=0,tc_t0=0,tc_tdur=0,divide=True, return_trend=False, centroid=False):
     """
     lcurve - lightcurve, ndarray with first column time, second flux, third error (used for weighting the polynomial fit).
     split - whether to split the lightcurve on each TESS orbit. Assumes start of lightcurve is start of a sector.
@@ -168,7 +167,6 @@ def TESSflatten(lcurve, split=True, winsize=2.5,
     transitcut - mask transits. Should be an integer showing how many planets to mask
     tc_per etc - parameters of transit to mask. If transitcut >1, these need to be indexable, e.g. a list of the periods
     divide - normalise by the fitted baseline if true (e.g. for flux timeseries), otherwise subtract the baseline
-    return_trend - return the detredning curve
     """
     time_diff = np.diff(lcurve[:, 0])
     cadence = np.median(time_diff)
@@ -176,6 +174,7 @@ def TESSflatten(lcurve, split=True, winsize=2.5,
     trend_lst = []
 
     if split:
+
         gap_indices = np.argwhere(time_diff > 1.0)
         gap_indices += 1
         gap_indices = np.append(gap_indices, len(lcurve[:, 0]))
@@ -195,6 +194,12 @@ def TESSflatten(lcurve, split=True, winsize=2.5,
                 i = idx
 
         gap_indices = [x for x in gap_indices if x not in falsegap]
+        
+        if centroid:
+            discontinuities = np.where(np.abs(np.diff(lcurve[:,1])) > 1e-2)[0]
+            discontinuities += 1
+            gap_indices = list(gap_indices) + [x for x in discontinuities if x not in gap_indices]
+            gap_indices = sorted(gap_indices)
                 
         start = 0
         for end in gap_indices:

@@ -4,9 +4,9 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astroquery.mast import Catalogs
 from astropy.io import fits
-from . import TESSselfflatten as tsf
+from CandidateSet import TESSselfflatten as tsf
 import numpy as np
-import os
+from CandidateSet import TransitFit
 from pathlib import Path
 from requests.exceptions import ConnectionError
 import matplotlib.pyplot as plt
@@ -43,7 +43,7 @@ def load_default(infile, lc_dir, per_lim=None, depth_lim=None):
     
     data = data.join(sec_df, how='inner')
     data.sort_values(['ticid', 'candidate'])
-
+    
     return data
 
 def load_archive_toi(infile, lc_dir, per_lim=None, depth_lim=None):
@@ -156,149 +156,29 @@ def load_exofop_toi(infile, lc_dir, per_lim=None, depth_lim=None):
     return toi_df
 
 
-def TIC_byID(ID):
-    """
-    """
+def query_tic_by_id(ticid, radius):
     try:
-        catTable = Catalogs.query_criteria(ID=ID, catalog="Tic")
+        tic_res = Catalogs.query_object(f'TIC {ticid}', catalog='Tic', radius=radius)
+        tic_res = tic_res['ID', 'GAIA', 'ra', 'dec', 'RA_orig', 'Dec_orig', 'pmRA','pmDEC', 'rad', 'mass', 'Teff', 
+                          'Tmag', 'e_Tmag', 'GAIAmag', 'e_GAIAmag', 'Vmag', 'e_Vmag', 'disposition', 'objType']
+        tic_res = tic_res.to_pandas()
+        idx = pd.notna(tic_res[['RA_orig', 'Dec_orig']]).any(axis=1)
+        tic_res.loc[idx, 'ra'] = tic_res.loc[idx, 'RA_orig']
+        tic_res.loc[idx, 'dec'] = tic_res.loc[idx, 'Dec_orig']
+        tic_res.drop(['RA_orig', 'Dec_orig'], axis=1, inplace=True)
+        tic_res.rename(columns={'ID':'ticid', 'GAIA':'Gaia_id', 'pmRA':'pmra', 'pmDEC':'pmdec',
+                                'GAIAmag':'Gmag', 'e_GAIAmag':'e_Gmag'}, inplace=True)
+        tic_res['ticid'] = tic_res['ticid'].astype('Int64')
         
-        return catTable['ID', 'ra', 'dec', 'Tmag', 'e_Tmag', 'GAIAmag', 'e_GAIAmag', 'Vmag', 'e_Vmag']
+        return tic_res
     except ConnectionError:
-        print('Connection failed. Source not created.')
-        return 0
+        print('Connection error')
+        return None
 
 
-def TIC_lookup(coords, search_radius=0.05555):
+def load_spoc_lc(filepath, hdu=None, flatten=False,  transitcut=False, tc_per=None, tc_t0=None, tc_tdur=None, return_trend=False, return_hdu=False):
     """
-    """
-    scoord = SkyCoord(ra=coords[0], dec=coords[1], unit='deg', frame='icrs')
-    radius = u.Quantity(search_radius, u.deg)
-
-    try:
-        catTable = Catalogs.query_region(scoord, catalog="Tic", radius=radius) 
-        
-        return catTable['ID', 'ra', 'dec', 'rad', 'mass', 'Teff', 'Tmag', 'GAIAmag', 'Vmag', 'disposition']
-    except ConnectionError:
-        print('Connection error. Nearby sources not found.')
-        return 0
-
-
-def load_spoc_centroid(filepath, flatten=False, trim=False, cut_outliers=False, sectorstart=None, transitcut=False, tc_per=None, tc_t0=None, tc_tdur=None):
-    """
-    Loads TESS SPOC lightcurve centroid data
-    """
-    flag = ''
-    
-    hdu = fits.open(filepath)
-    time = hdu[1].data['TIME']
-    flux = hdu[1].data['PDCSAP_FLUX']
-    if sectorstart is None:
-        sectorstart = time[0]
-    if tc_per == 0:
-        tc_per = time[-1] - time[0]
-    if tc_tdur / tc_per > 0.2:
-        tc_tdur = tc_per*0.2
-    X = hdu[1].data['MOM_CENTR1']
-    Y = hdu[1].data['MOM_CENTR2']
-    cam = hdu[0].header['CAMERA']
-    ccd = hdu[0].header['CCD']   
-    
-    nancut = np.isnan(time) | np.isnan(X) | np.isnan(Y) | np.isnan(flux)
-    time = time[~nancut]
-    X = X[~nancut]
-    Y = Y[~nancut]
-    
-    if len(time) <= len(hdu[1].data['TIME'])/2 or len(hdu[1].data['TIME']) < 3:  # if nancut removed > half the points, or there weren't any anyway
-        flag = 'Not enough data'
-    
-
-    hdu.close()
-    
-    if flag:
-        return time, X, Y, flag, cam, ccd
-    
-    normphase = np.abs((np.mod(time-tc_t0-tc_per*0.5, tc_per) - 0.5*tc_per) / (0.5*tc_tdur))
-    intransit = normphase <= 1
-    
-    exp_time = np.nanmedian(np.diff(time)) * 24 * 60
-    exp_time = int(np.round(exp_time))
-    
-    if sum(intransit) == 0 and not flag:
-        flag = 'No transit data' 
-    elif sum(intransit) <= 2 and not flag:
-        flag = 'Not enough transit data'
-
-    if trim:        
-        if exp_time <= 2.1:
-            cut_num = 360
-        elif exp_time <= 11:
-            cut_num = 72
-        else:
-            cut_num = 24
-            
-        # Remove the first 12 hours of observations
-        time = time[cut_num:len(time)]
-        X = X[cut_num:len(X)]
-        Y = Y[cut_num:len(Y)]
-        
-        normphase = np.abs((np.mod(time-tc_t0-tc_per*0.5, tc_per) - 0.5*tc_per) / (0.5*tc_tdur))
-        intransit = normphase <= 1
-        
-        if sum(intransit) == 0 and not flag:
-            flag = 'No transit data after trim' 
-        elif sum(intransit) <= 2 and not flag:
-            flag = 'Not enough transit data after trim'
-            
-    if flatten:
-        Xcurve = np.array([time, X, np.ones(len(time))]).T
-        Ycurve = np.array([time, Y, np.ones(len(time))]).T
-
-        X = tsf.TESSflatten(Xcurve, sectorstart=sectorstart, split=True, winsize=2, stepsize=0.15, polydeg=3,
-                            niter=10, sigmaclip=4., gapthresh=100., transitcut=transitcut,
-                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False)
-        Y = tsf.TESSflatten(Ycurve, sectorstart=sectorstart, split=True, winsize=2, stepsize=0.15, polydeg=3,
-                            niter=10, sigmaclip=4., gapthresh=100., transitcut=transitcut,
-                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False)
-        
-    if cut_outliers:
-
-        MAD_X = MAD(X[~intransit])
-        MAD_Y = MAD(Y[~intransit])
-        if (MAD_X == 0 or MAD_Y == 0) and not flag:
-            flag = 'MAD is 0'
-
-        cut = (np.abs(X-np.median(X))/MAD_X < cut_outliers) & (np.abs(Y-np.median(Y))/MAD_Y < cut_outliers)
-
-        # avoid removing too much (happens with discontinuities for example)
-        while np.sum(cut) < 3*len(X)/4:
-            cut_outliers = cut_outliers + 1
-            cut = (np.abs(X-np.median(X))/MAD_X < cut_outliers) & (np.abs(Y-np.median(Y))/MAD_Y < cut_outliers)
-            
-        cut[intransit] = True  # never cut points in the transit, too much risk they'll be marked as outliers
-        time = time[cut]
-        X = X[cut]
-        Y = Y[cut]
-        
-        normphase = np.abs((np.mod(time-tc_t0-tc_per*0.5, tc_per) - 0.5*tc_per) / (0.5*tc_tdur))
-        intransit = normphase <= 1
-        
-        mad_x_in = MAD(X[intransit])
-        mad_y_in = MAD(Y[intransit])
-        index_in = np.arange(len(time))[intransit]
-        
-        cut = (np.abs(X[intransit]-np.median(X[intransit]))/mad_x_in > 6) | (np.abs(Y[intransit]-np.median(Y[intransit]))/mad_y_in > 6)
-        index_cut = index_in[cut]
-        
-        X = np.delete(X, index_cut) 
-        Y = np.delete(Y, index_cut) 
-        time = np.delete(time, index_cut) 
-               
-    return time, X, Y, flag, cam, ccd
-
-
-def load_spoc_lc(filepath, hdu=None, flatten=False,  sectorstart=None, transitcut=False, tc_per=None, tc_t0=None, tc_tdur=None, return_trend=False, return_hdu=False):
-    """
-    Loads a TESS SPOC lightcurve, normalised with NaNs removed.
+    Loads a TESS lightcurve, normalised with NaNs removed.
  
     Returns:
     lc -- 	dict
@@ -325,11 +205,10 @@ def load_spoc_lc(filepath, hdu=None, flatten=False,  sectorstart=None, transitcu
            
     lcurve = np.array([lc['time'], lc['flux'], np.ones(len(lc['time']))]).T
     
-    lcflat, trend = tsf.TESSflatten(lcurve, sectorstart=sectorstart, split=True, winsize=2.0, stepsize=0.15, polydeg=3,
+    lcflat, trend = tsf.TESSflatten(lcurve, split=True, winsize=2.0, stepsize=0.15, polydeg=3,
                                 niter=10, sigmaclip=4., gapthresh=100., transitcut=transitcut,
                                 tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, return_trend=True)
       
-    
     if flatten:    
         lc['flux'] = lcflat
          
@@ -344,9 +223,11 @@ def load_spoc_lc(filepath, hdu=None, flatten=False,  sectorstart=None, transitcu
                     p = np.max((p1, p2))
                 normphase = np.abs((np.mod(lc['time']-tc_t0[i]-p*0.5, p) - 0.5*p) / (0.5*tc_tdur[i]))
                 intransit += normphase <= 1
-        else:
+        elif tc_per is not None:
             normphase = np.abs((np.mod(lc['time']-tc_t0-tc_per*0.5, tc_per) - 0.5*tc_per) / (0.5*tc_tdur))
             intransit = normphase <= 1
+        else:
+            intransit = np.full_like(lc['time'], 0)
         
         # Remove intransit upward outliers
         outliers = (lc['flux'] - np.median(lc['flux']))/mad > 4
@@ -376,6 +257,130 @@ def load_spoc_lc(filepath, hdu=None, flatten=False,  sectorstart=None, transitcu
         del hdu
         
         return lc
+         
+         
+def load_spoc_centroid(filepath, flatten=False, trim=False, cut_outliers=False, transitcut=False, tc_per=None, tc_t0=None, tc_tdur=None):
+    """
+    Loads TESS SSC lightcurve centroid data
+    """
+    flag = ''
+    
+    hdu = fits.open(filepath)
+    time = hdu[1].data['TIME']
+    flux = hdu[1].data['PDCSAP_FLUX']
+
+    if tc_per is not None:
+        if tc_per == 0:
+            tc_per = time[-1] - time[0]
+        if tc_tdur / tc_per > 0.2:
+            tc_tdur = tc_per*0.2
+    X = hdu[1].data['MOM_CENTR1']
+    Y = hdu[1].data['MOM_CENTR2']
+    cam = hdu[0].header['CAMERA']
+    ccd = hdu[0].header['CCD']   
+    
+    nancut = np.isnan(time) | np.isnan(X) | np.isnan(Y) | np.isnan(flux)
+    time = time[~nancut]
+    X = X[~nancut]
+    Y = Y[~nancut]
+    
+    if len(time) <= len(hdu[1].data['TIME'])/2 or len(hdu[1].data['TIME']) < 3:  # if nancut removed > half the points, or there weren't any anyway
+        flag = 'Not enough data'
+    
+
+    hdu.close()
+    
+    if flag:
+        return time, X, Y, flag, cam, ccd
+    
+
+    if tc_per is not None and tc_t0 is not None:
+        normphase = np.abs((np.mod(time-tc_t0-tc_per*0.5, tc_per) - 0.5*tc_per) / (0.5*tc_tdur))
+        intransit = normphase <= 1
+        
+        if sum(intransit) == 0 and not flag:
+            flag = 'No transit data' 
+        elif sum(intransit) <= 2 and not flag:
+            flag = 'Not enough transit data'
+
+    if trim: 
+        exp_time = np.nanmedian(np.diff(time)) * 24 * 60
+        exp_time = int(np.round(exp_time))       
+        if exp_time <= 2.1:
+            cut_num = 360
+        elif exp_time <= 11:
+            cut_num = 72
+        else:
+            cut_num = 24
+            
+        # Remove the first 12 hours of observations
+        time = time[cut_num:len(time)]
+        X = X[cut_num:len(X)]
+        Y = Y[cut_num:len(Y)]
+        
+        if tc_per is not None and tc_t0 is not None:
+            normphase = np.abs((np.mod(time-tc_t0-tc_per*0.5, tc_per) - 0.5*tc_per) / (0.5*tc_tdur))
+            intransit = normphase <= 1
+            
+            if sum(intransit) == 0 and not flag:
+                flag = 'No transit data after trim' 
+            elif sum(intransit) <= 2 and not flag:
+                flag = 'Not enough transit data after trim'
+            
+            
+ 
+    if flatten:
+        Xcurve = np.array([time, X, np.ones(len(time))]).T
+        Ycurve = np.array([time, Y, np.ones(len(time))]).T
+
+        X = tsf.TESSflatten(Xcurve, split=True, winsize=2, stepsize=0.15, polydeg=3,
+                            niter=10, sigmaclip=4., gapthresh=100., transitcut=transitcut,
+                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False, centroid=False)
+        Y = tsf.TESSflatten(Ycurve, split=True, winsize=2, stepsize=0.15, polydeg=3,
+                            niter=10, sigmaclip=4., gapthresh=100., transitcut=transitcut,
+                            tc_per=tc_per, tc_t0=tc_t0, tc_tdur=tc_tdur, divide=False, centroid=False)
+        
+    if cut_outliers:
+        if tc_per is not None and tc_t0 is not None:
+            MAD_X = MAD(X[~intransit])
+            MAD_Y = MAD(Y[~intransit])
+        else:
+            MAD_X = MAD(X)
+            MAD_Y = MAD(Y)
+            
+        if (MAD_X == 0 or MAD_Y == 0) and not flag:
+            flag = 'MAD is 0'
+
+        cut = (np.abs(X-np.median(X))/MAD_X < cut_outliers) & (np.abs(Y-np.median(Y))/MAD_Y < cut_outliers)
+
+        # avoid removing too much (happens with discontinuities for example)
+        while np.sum(cut) < 3*len(X)/4:
+            cut_outliers = cut_outliers + 1
+            cut = (np.abs(X-np.median(X))/MAD_X < cut_outliers) & (np.abs(Y-np.median(Y))/MAD_Y < cut_outliers)
+        
+        if tc_per is not None and tc_t0 is not None:  
+            cut[intransit] = True  # never cut points in the transit, too much risk they'll be marked as outliers
+        
+        time = time[cut]
+        X = X[cut]
+        Y = Y[cut]
+        
+        if tc_per is not None and tc_t0 is not None:
+            normphase = np.abs((np.mod(time-tc_t0-tc_per*0.5, tc_per) - 0.5*tc_per) / (0.5*tc_tdur))
+            intransit = normphase <= 1
+            
+            mad_x_in = MAD(X[intransit])
+            mad_y_in = MAD(Y[intransit])
+            index_in = np.arange(len(time))[intransit]
+            
+            cut = (np.abs(X[intransit]-np.median(X[intransit]))/mad_x_in > 6) | (np.abs(Y[intransit]-np.median(Y[intransit]))/mad_y_in > 6)
+            index_cut = index_in[cut]
+            
+            X = np.delete(X, index_cut) 
+            Y = np.delete(Y, index_cut) 
+            time = np.delete(time, index_cut) 
+                
+    return time, X, Y, flag, cam, ccd
          
          
 def load_spoc_masks(filepath):
@@ -442,10 +447,33 @@ def observed_transits(time, t0, per, tdur):
     return count
 
 
+def trapfit_results(t0, tdur, depth, per, lc):
+    trapfit_initialguess = np.array([tdur * 0.9 / per, tdur / per, depth*1e-6])
+
+    trapfit = TransitFit.TransitFit(lc, trapfit_initialguess, fixper=per, fixt0=t0)
+    
+    fit_tdur = trapfit.params[1]*per
+    fit_tdur23 = trapfit.params[0]*per
+    fit_depth = trapfit.params[2]*1e6
+    return fit_tdur, fit_tdur23, fit_depth
+
+
+def transit_params(lc, t0, per, tdur, depth):
+    transits = observed_transits(lc['time'], t0, per, tdur)
+    phase = phasefold(lc['time'], per, t0 - 0.5*per) -0.5
+    intransit = np.abs(phase) < 0.5*tdur/per
+    
+    if transits > 0 and sum(intransit) > 3:
+        fit_tdur, fit_tdur23, fit_depth = trapfit_results(t0, tdur, depth, per, lc)
+        
+        return fit_tdur, fit_tdur23, fit_depth
+    else:
+        return tdur, np.nan, np.nan
+
+
 def centroid_fitting(ticid, candidate, sector, time, X, Y, per, t0, tdur, tdur23, loss='linear', plot=False): 
     if per == 0:
-        per = time[-1] - time[0]
-        
+        per = time[-1] - time[0]    
     normphase = np.abs((np.mod(time-t0-per*0.5, per) - 0.5*per) / (0.5*tdur))
     
     intransit = normphase <= 1  
@@ -532,6 +560,20 @@ def centroid_fitting(ticid, candidate, sector, time, X, Y, per, t0, tdur, tdur23
     return x_diff, x_err, y_diff, y_err, flag
 
 
+def gaia_pm_corr(time, ra, dec, pmra, pmdec, gaia_release='dr2'):
+    if gaia_release == 'dr2':
+        jd = 2457206 - 2457000
+    else:
+        jd = 2457388.5 - 2457000
+    
+    time_elapsed = ((time - jd)*u.day).to(u.year)
+    
+    cor_ra = ra + (((pmra*u.milliarcsecond/u.year)*time_elapsed).to(u.degree)).value
+    cor_dec = dec + (((pmdec*u.milliarcsecond/u.year)*time_elapsed).to(u.degree)).value
+    
+    return cor_ra, cor_dec
+
+
 def nearby_depth(depth, f_t, f_n):
     depth_n = depth * np.divide(f_t, f_n, out=np.zeros_like(f_n), where=f_n!=0.0)
 
@@ -550,80 +592,45 @@ def test_target_aperture(x, y, aperture):
     return test
     
 
-def calc_flux_fractions(sec, cam, ccd, origin, X_sources, Y_sources, fluxes, aperture):
+def sources_prf(sec, cam, ccd, origin, X_sources, Y_sources, shape):
+    '''
+    Returns the prf models centred on each source for all pixels of the target pixel
+    '''
     from CandidateSet import PRF
     
-    # Identify the pixels used in the aperture
-    pixels = np.where(aperture == 1)
-
-    # Extract a 2x2 array of the mask grid. Pixels not used will retain 0 in their values.
-    y_min = np.min(pixels[0])
-    y_max = np.max(pixels[0]) + 1
+    prfs = np.zeros([X_sources.size, shape[0], shape[1]])
     
-    x_min = np.min(pixels[1])
-    x_max = np.max(pixels[1]) + 1
-    
-    aperture_only = aperture[y_min:y_max, x_min:x_max]
-    
-    aperture_flux = np.zeros([X_sources.size, aperture_only.shape[0], aperture_only.shape[1]])
-        
     tp_x = np.round(origin[0] + X_sources[0])
     tp_y = np.round(origin[1] + Y_sources[0])
 
     if sec < 4:
-        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 1'
+        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 1'
     else:
-        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 4'
+        prf_folder = Path.cwd() / 'CandidateSet' / 'PRF files' / 'Sector 4'
                 
-    prf = PRF.TESS_PRF(cam, ccd, sec, tp_x, tp_y, prf_folder)
+    prf_model = PRF.TESS_PRF(cam, ccd, sec, tp_x, tp_y, prf_folder)
     
     for i in range(len(X_sources)):
-        aperture_flux[i] = prf.locate(X_sources[i], Y_sources[i], aperture.shape)[y_min:y_max, x_min:x_max]
+        prfs[i] = prf_model.locate(X_sources[i], Y_sources[i], shape)
         
-    aperture_flux *= fluxes[:, None, None] #convert fractions to actual fluxes within each pixel (still by star)    
+    return prfs
+
+
+def flux_fraction_in_ap(fluxes, aperture, source_prfs):
+    from CandidateSet import PRF
+                
+    aperture_flux = source_prfs*fluxes[:, None, None] #convert fractions to actual fluxes within each pixel (still by star)    
     
-    aperture_flux *= aperture_only # Multiplies by either 1 or 0 if pixel is in the aperture mask or not
-    all_ap_flux = np.sum(aperture_flux)
+    aperture_flux *= aperture # Multiplies by either 1 or 0 if pixel is in the aperture mask or not
+    total_ap_flux = np.sum(aperture_flux)
     
     flux_fractions = []
     
-    for i in range(len(X_sources)):
+    for i in range(len(fluxes)):
         source_ap_flux = np.sum(aperture_flux[i])
-        flux_fractions.append(source_ap_flux/all_ap_flux)
+        flux_fractions.append(source_ap_flux/total_ap_flux)
         
-    return flux_fractions, all_ap_flux  
-
-
-def prf_fractions(sec, cam, ccd, origin, X_sources, Y_sources, aperture):
-    from CandidateSet import PRF
-    
-    # Identify the pixels used in the aperture
-    pixels = np.where(aperture == 1)
-
-    # Extract a 2x2 array of the mask grid. Pixels not used will retain 0 in their values.
-    y_min = np.min(pixels[0])
-    y_max = np.max(pixels[0]) + 1
-    
-    x_min = np.min(pixels[1])
-    x_max = np.max(pixels[1]) + 1
-    
-    aperture_only = aperture[y_min:y_max, x_min:x_max]
-    fluxfractions = np.zeros([X_sources.size, aperture_only.shape[0], aperture_only.shape[1]])
-    
-    tp_x = np.round(origin[0] + X_sources[0])
-    tp_y = np.round(origin[1] + Y_sources[0])
-
-    if sec < 4:
-        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 1'
-    else:
-        prf_folder = Path(__file__).resolve().parents[0] / 'PRF files' / 'Sector 4'
-                
-    prf = PRF.TESS_PRF(cam, ccd, sec, tp_x, tp_y, prf_folder)
-    
-    for i in range(len(X_sources)):
-        fluxfractions[i] = prf.locate(X_sources[i], Y_sources[i], aperture.shape)[y_min:y_max, x_min:x_max]
-        
-    return fluxfractions
+    return flux_fractions, total_ap_flux  
 
 
 def model_centroid(aperture, fluxes, fluxfractions):
@@ -639,14 +646,16 @@ def model_centroid(aperture, fluxes, fluxfractions):
     
     aperture_only = aperture[y_min:y_max, x_min:x_max]
     fluxfractions = fluxfractions * fluxes[:, None, None] #convert fractions to actual fluxes within each pixel (still by star)
-    fluxfractions = np.sum(fluxfractions, axis=0) #should now be 2D. All flux contributions in each pixel now totalled. Could be used for diagnostics, this array should now be a simulated image of the aperture.
+    fluxfractions = np.sum(fluxfractions, axis=0) #should now be 2D.
+    
+    fluxfractions = fluxfractions[y_min:y_max, x_min:x_max]
  
     fluxfractions *= aperture_only # Multiplies by either 1 or 0 if pixel is in the aperture mask or not
     #need to specify indices in below two lines. Depends on format of aperture.
     X = np.average(np.arange(x_min, x_max),weights=np.sum(fluxfractions,axis=0)) #sums fluxfractions across y axis to leave x behind
     Y = np.average(np.arange(y_min, y_max),weights=np.sum(fluxfractions,axis=1)) #sums fluxfractions across x axis to leave y behind
     
-    return X, Y    
+    return X, Y 
 
 
 def calc_centroid_probability(cent_x, cent_y, cent_x_err, cent_y_err, diff_x, diff_y, diff_x_err, diff_y_err):
@@ -654,7 +663,7 @@ def calc_centroid_probability(cent_x, cent_y, cent_x_err, cent_y_err, diff_x, di
     Y_err = np.sqrt(cent_y_err ** 2 + diff_y_err ** 2)
     
     from scipy import spatial
-    # get mahalanobis distance
+    # get mahalanobis distance?
     cov = np.array([[X_err ** 2, 0], [0, Y_err ** 2]])
     VI = np.linalg.inv(cov)
     mahalanobis = spatial.distance.mahalanobis([diff_x, diff_y], [cent_x, cent_y], VI)

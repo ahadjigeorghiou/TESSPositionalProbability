@@ -5,18 +5,16 @@ import os
 
 import astropy.units as u
 
-from collections import defaultdict
 import pickle
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from itertools import repeat
 
-from . import utils, TransitFit
+from CandidateSet import utils
 
 
 class CandidateSet(object):
 
-    def __init__(self, infile, infile_type='default', lc_dir='default', per_lim=None, depth_lim=None, multiprocessing=1, save_output=False, save_suffix=None, load_suffix=None, plot_centroid=False):
+    def __init__(self, infile, infile_type='default', lc_dir='default', per_lim=None, depth_lim=None, multiprocessing=0, save_output=False, save_suffix=None, load_suffix=None, plot_centroid=False):
         """
         Load in a set of candidates with their transit parameters [period, epoch, depth]. Sets up the environment for running the positional probabilitiy generation.         
         
@@ -26,7 +24,7 @@ class CandidateSet(object):
         lc_dir - either path to lighcurve directory or set as default.
         per_lim - set maximum period limit for candidates to be processed. Candidates with period longer than maximum will be skipped.
         depth_lim - set minimum depth limit for candidates. Candidates with depth less than the minimum will be skipped.
-        multiprocessing - set maximum number of workers (set 1 for no multiprocessing)
+        multiprocessing - set maximum number of workers (set 0 for no multiprocessing and 1 to use all available processors)
         save_output - True/False. Affects all data generation except for the probability generation, which always saves the output.
         save_suffix - Suffix for the filenames of all saved data.
         load_suffix - Suffix for loading previously saved data.
@@ -56,6 +54,9 @@ class CandidateSet(object):
         self.estimate_depths = False
         self.possible_sources = False
         
+        if multiprocessing == 1:
+            multiprocessing = os.cpu_count()
+            
         self.multiprocessing = multiprocessing
         
         self.save_output = save_output
@@ -80,11 +81,14 @@ class CandidateSet(object):
             outfile.mkdir(exist_ok=True)
         
     
-    def find_TIC_stars(self, rerun=False):
+    def generate_sources(self, infile=None, rerun=False):
         """
-        Identify nearby TIC stars (includes GAIA) for each candidate, up to 8.5 ΔTmag.
+        Retrieve stellar characteristics from the TIC for each target star 
+        and generate the source object data-containeres that will be used to run the pipeline. 
+        Identify nearby TIC stars for each candidate, up to 8.5 ΔTmag.
         
         Parameters:
+        infile - Overwrite the load suffix specified in class creation to load a user specified file.
         rerun - force the nearby star indentification process to rerun, irrespective of whether a load_suffix was provided during the class initialization or if sources already exist
         """
         # Get the unique ticids. Multiple candidates on one source will result to only one source created.
@@ -92,8 +96,11 @@ class CandidateSet(object):
 
         # Load in data from file, if provided at class initialisation
         preload = False
-        if self.load_suffix and not rerun:
-            infile = self.output / f'sources_{self.load_suffix}.pkl'
+        if (self.load_suffix or infile) and not rerun and not self.find_stars:
+            if infile:
+                infile = Path(infile)
+            else:
+                infile = self.output / f'sources_{self.load_suffix}.pkl'
             print('Loading from ' + str(infile))
             try:
                 with open(infile, 'rb') as f:
@@ -113,88 +120,13 @@ class CandidateSet(object):
         if not preload and not rerun and len(self.sources.keys()) > 0:
             targets = np.setdiff1d(targets, list(self.sources.keys()), assume_unique=True)
             print('Existing sources found and are being reused')
-        
-        # Create an internal function to aid in multi-threading   
-        def _find(targetid):
-            source_obj = None 
-            nearbyfail = 0 # Handle for failure cases
-            s_rad = 168 * u.arcsec.to('degree')  # 8 TESS pixels
-            
-            # Retrieve the source data for the target
-            source_data = utils.TIC_byID(targetid)
-
-            # Handle failure to find target
-            if not source_data:
-                return source_obj, nearbyfail
                 
-            # Retrieve the TESS, GAIA and V magnitudes
-            mags = {'TESS': (source_data['Tmag'][0], source_data['e_Tmag'][0]),
-                    'G': (source_data['GAIAmag'][0], source_data['e_GAIAmag'][0]),
-                    'V': (source_data['Vmag'][0], source_data['e_Vmag'][0])}
-            # Create the source object
-            source_obj = Source(tic = targetid,
-                                coords = (source_data['ra'][0], source_data['dec'][0]), 
-                                mags = mags)
-
-            # Identify the nearby sources. This will also retrieve the target star
-            ticsources = utils.TIC_lookup(source_obj.coords, search_radius=s_rad)
-            
-            # Handle nearby sources identification
-            if not ticsources:
-                # Failure to find nearby sources due to connection issues
-                nearbyfail = 1 
-                source_obj = None
-            else:
-                # Store the nearby sources data, including that of the target star in a dictionary
-                nearsources = defaultdict(list)
-                for source_data in ticsources:
-                    # Check if the source has been flagged as an Articact or Duplicate in the TIC, to exlude them
-                    if source_data['disposition'] == 'ARTIFACT' or source_data['disposition'] == 'DUPLICATE':
-                        # If the target star was flagged, returns none instead of the source object and the disposition, so that it can be reported and removed from the dataset
-                        if int(source_data['ID']) == targetid:
-                            return None, source_data['disposition']
-                        else:
-                            continue
-                        
-                    nearsources['ticid'].append(int(source_data['ID']))
-                    nearsources['ra'].append(source_data['ra'])
-                    nearsources['dec'].append(source_data['dec'])
-                    nearsources['rad'].append(source_data['rad'])
-                    nearsources['mass'].append(source_data['mass'])
-                    nearsources['teff'].append(source_data['Teff'])
-                    nearsources['Tmag'].append(source_data['Tmag'])
-                    nearsources['G'].append(source_data['GAIAmag'])
-                    nearsources['V'].append(source_data['Vmag'])
-                
-                # Convert the dictionary to dataframe for ease of usage
-                nearsources = pd.DataFrame(nearsources)
-                
-                # Remove faint sources with dTmag greater than 8.5
-                tmag_limit = source_obj.mags['TESS'][0] + 8.5
-                nearsources.query(f'Tmag < {tmag_limit}', inplace=True)
-                nearsources.set_index('ticid', inplace=True)
-                
-                # Use the Tmag to calculate the expected flux counts observed by each source
-                nearsources['Flux'] = 15000 * 10 ** (-0.4 * (nearsources['Tmag'] - 10))
-                
-                # Ensure that the target is always first in the dataframe
-                nearsources['order'] = np.arange(len(nearsources))  + 1
-                nearsources.loc[targetid, 'order'] = 0
-                nearsources.sort_values('order', inplace=True)
-                nearsources.drop('order', axis=1, inplace=True)
-                
-                # Store the nearby date into the source object
-                source_obj.nearby_data = nearsources
-            
-            return source_obj, nearbyfail
-        
-        
         if len(targets) > 0:
             print(f'Retrieving data from MAST for {len(targets)} targets')
             source_fail = []
-            nearby_fail = []
             duplicate = []
             artifact = []
+            non_gaia = []
             
             # Run the identification process
             if self.multiprocessing > 1 and len(targets) > 10:
@@ -203,36 +135,36 @@ class CandidateSet(object):
                 workers = np.min((self.multiprocessing*4, 20)) 
                 with ThreadPoolExecutor(max_workers=workers) as ex:
                     try:
-                        futures = {ex.submit(_find, targetid): targetid for targetid in targets}
+                        futures = {ex.submit(self.find_TIC_stars, targetid): targetid for targetid in targets}
                         
                         # Retrieve results as they are returned
                         for future in as_completed(futures):
-                            ticid = futures[future] 
+                            targetid = futures[future] 
                             try:
-                                source_obj, near = future.result()
-                                if source_obj:
+                                source_obj, fail = future.result()
+                                if source_obj and fail is None:
                                     # Store the source object in the sources class dictionary if it was successfully created 
-                                    self.sources[ticid] = source_obj
+                                    self.sources[targetid] = source_obj
                                 else:
                                     # Handle the failure cases 
-                                    if near == 'DUPLICATE':
+                                    if fail == 'DUPLICATE':
                                         print(f'{targetid} skipped due to being flagged as a duplicate')
                                         duplicate.append(targetid)
-                                    elif near == 'ARTIFACT':
+                                    elif fail == 'ARTIFACT':
                                         print(f'{targetid} skipped due to being flagged as an artifact')
                                         artifact.append(targetid)
-                                    elif near == 1:
-                                        print(f'{targetid} source not created due to failure in identifying the nearby sources')
-                                        nearby_fail.append(targetid)
+                                    elif fail == 'NonGaia':
+                                        self.sources[targetid] = source_obj
+                                        print(f'{targetid} flagged as it has no Gaia ID')
+                                        non_gaia.append(targetid)
                                     else:
                                         print(f'{targetid} source failed to be created.')
                                         source_fail.append(targetid)
                                     
                             except Exception as e:
                                 # Handle uncaught exceptions
-                                print(f'Source not created for {ticid} due to exception: {e}')
-                                source_fail.append(ticid)
-                                nearby_fail.append(ticid)
+                                print(f'Source not created for {targetid} due to exception: {e}')
+                                source_fail.append(targetid)
            
                     except KeyboardInterrupt:
                         # Attempt to shutdown the multithreaded workload if interrupted
@@ -241,40 +173,41 @@ class CandidateSet(object):
             else:
                 # Single threaded workload
                 for targetid in targets:
-                    source_obj, near = _find(targetid)
-                    if source_obj:
+                    source_obj, fail = self.find_TIC_stars(targetid)
+                    if source_obj and fail is None:
                         # Store the successfully created sources
                         self.sources[targetid] = source_obj
                     else:
                         # Handle the failure cases 
-                        if near == 'DUPLICATE':
+                        if fail == 'DUPLICATE':
                             print(f'{targetid} skipped due to being flagged as a duplicate')
                             duplicate.append(targetid)
-                        elif near == 'ARTIFACT':
+                        elif fail == 'ARTIFACT':
                             print(f'{targetid} skipped due to being flagged as an artifact')
                             artifact.append(targetid)
-                        elif near == 1:
-                            print(f'{targetid} source not created due to failure in identifying the nearby sources')
-                            source_fail.append(targetid)
-                            nearby_fail.append(targetid)
+                        elif fail == 'NonGaia':
+                            self.sources[targetid] = source_obj
+                            print(f'{targetid} flagged as it has no Gaia ID')
+                            non_gaia.append(targetid)
                         else:
                             print(f'{targetid} source failed to be created.')
                             source_fail.append(targetid)
             
-            # Remove duplicate sources
+            # Handle duplicate target sources
+            
             self.data.drop(duplicate, axis=0, level=0, inplace=True)
             # Remove artifact sources
             self.data.drop(artifact, axis=0, level=0, inplace=True)
             # Output completion log
             print('Source identification and object creation completed.')
             if len(duplicate) > 0:
-                print(f'{len(duplicate)} duplicate source(s) removed:', duplicate)
+                print(f'{len(duplicate)} duplicate target source(s) removed:', duplicate)
             if len(artifact) > 0:
-                print(f'{len(artifact)} artifact source(s) removed:', artifact)
-            
+                print(f'{len(artifact)} artifact target source(s) removed:', artifact)
+            if len(non_gaia) > 0:
+                print(f'{len(non_gaia)} non Gaia target source(s) flagged:', non_gaia)  
             if len(source_fail) > 0:   
                 print(f'{len(source_fail)} source(s) failed to be created:', source_fail)
-                print(f'Failure to find nearby stars for {len(nearby_fail)} source(s)', nearby_fail)
             else:
                 # Mark the process as completed
                 self.find_stars = True
@@ -284,13 +217,93 @@ class CandidateSet(object):
             outfile = self.output / f'sources_{self.save_suffix}.pkl'
             with open(outfile, 'wb') as f:
                 pickle.dump(self.sources, f, protocol=5)
-
-
-    def generate_per_sector_data(self, rerun=False):
-        """
-        Determine the per sector depth. transit duration and the duration without ingress/egrees
+                
+    @staticmethod            
+    def find_TIC_stars(targetid):
+        '''
+        Function for retrieving the stellar characteristics of target stars and their nearby identified sources.
+        Separated to aid mutlti-threaded runs.
         
         Parameters:
+        targetid - the TIC id of the target star
+        '''
+        source_obj = None 
+        fail = None # Handle for failure cases
+        s_rad = 168 * u.arcsec  # 8 TESS pixels
+        
+        # Retrieve the data for the target and its nearby sources
+        sources_data = utils.query_tic_by_id(targetid, s_rad)
+
+        # Handle failure to find target
+        if sources_data is None:
+            return source_obj, fail
+        
+        # Select the target data
+        target_data = sources_data.query(f'ticid == {targetid}').iloc[0]
+        # Check if target is flagged as duplicate or artifact
+        if target_data['disposition'] == 'ARTIFACT' or target_data['disposition'] == 'DUPLICATE':
+            fail = target_data['disposition']
+            return source_obj, fail
+        if pd.isna(target_data['Gaia_id']):
+            fail = 'NonGaia'
+        
+        # Remove artifact or duplicate nearby sources
+        sources_data.drop(sources_data.query('disposition == "DUPLICATE" or disposition == "ARTIFACT"').index, inplace=True)
+        
+        # Identify sources with no Gaia entry
+        idx_non_gaia = pd.isna(sources_data['Gaia_id'])
+        
+        # Set the proper motion of non Gaia sources to 0
+        sources_data.loc[idx_non_gaia, 'pmra'] = 0
+        sources_data.loc[idx_non_gaia, 'pmdec'] = 0
+        
+        # Set nan proper motion to 0, to ease subsequent calculations
+        idx_na = pd.isna(sources_data[['pmra', 'pmdec']]).any(axis=1)
+        sources_data.loc[idx_na, 'pmra'] = 0
+        sources_data.loc[idx_na, 'pmdec'] = 0
+
+        # Set up a source object for the target   
+        # Retrieve the TESS, GAIA and V magnitudes
+        mags = {'TESS': (target_data['Tmag'], target_data['e_Tmag']),
+                'G': (target_data['Gmag'], target_data['e_Gmag']),
+                'V': (target_data['Vmag'], target_data['e_Vmag'])}
+        
+        # Create the source object
+        source_obj = Source(tic = targetid,
+                            coords = (target_data['ra'], target_data['dec']),
+                            pm = (float(target_data['pmra']), float(target_data['pmdec'])), 
+                            mags = mags,
+                            star_rad = target_data['rad'],
+                            star_mass = target_data['mass'],
+                            teff = target_data['Teff'])
+        
+
+        # Remove faint sources with dTmag greater than 10
+        tmag_limit = source_obj.mags['TESS'][0] + 10
+        sources_data.query(f'Tmag <= {tmag_limit}', inplace=True)
+        sources_data.set_index('ticid', inplace=True)
+            
+        # Use the Tmag to calculate the expected flux counts observed by each source
+        sources_data['Flux'] = 15000 * 10 ** (-0.4 * (sources_data['Tmag'] - 10))
+            
+        # Ensure that the target is always first in the dataframe
+        sources_data['order'] = np.arange(len(sources_data))  + 1
+        sources_data.loc[targetid, 'order'] = 0
+        sources_data.sort_values('order', inplace=True)
+        sources_data.drop('order', axis=1, inplace=True)
+            
+        # Store the nearby data into the source object
+        source_obj.nearby_data = sources_data
+        
+        return source_obj, fail
+
+
+    def generate_per_sector_data(self, infile=None, rerun=False):
+        """
+        Determine the per sector depth, transit duration and the duration without ingress/egrees.
+        
+        Parameters:
+        infile - Overwrite the load suffix specified in class creation to load a user specified file.
         rerun - force the process to rerun, irrespective of whether a load_suffix was provided during the class initialization or if sector_data already exist
         """
         
@@ -299,10 +312,13 @@ class CandidateSet(object):
         if not self.find_stars:
             raise ValueError('Run find_tic_stars first')
         
-        # Load in data from file, if provided at class initialisation
+        # Load in data from file, if provided at class initialisation or when the function was called.
         preload = False
-        if self.load_suffix and not rerun:
-            infile = self.output / f'sectordata_{self.load_suffix}.csv'
+        if (self.load_suffix or infile) and not rerun and not self.sectordata:
+            if infile:
+                infile = Path(infile)
+            else:
+                infile = self.output / f'sectordata_{self.load_suffix}.csv'
             print('Loading from ' + str(infile))
             try:
                 data_preloaded = pd.read_csv(infile).set_index(['ticid', 'candidate', 'sector'])
@@ -342,7 +358,7 @@ class CandidateSet(object):
         
         if num_targets > 0:
             print(f'Running sector_data update for {num_targets} targets')
-            if self.multiprocessing > 1 and num_targets > 5:
+            if self.multiprocessing > 1 and num_targets > 1:
                 # Run multi-processed if requested at class initialisation and there are enough targets to be worth it
                 if num_targets < self.multiprocessing:
                     # If there are less targets than the specified number of cores, set the number of workers accordingly
@@ -361,7 +377,7 @@ class CandidateSet(object):
                         #print(len(ticid_split))  
                         
                         # Run the multiprocessed job, in a chunk based approach
-                        futures = {ex.submit(self.multi_sector_data, ticid_group): ticid_group for ticid_group in ticid_split}
+                        futures = {ex.submit(self.multi_target_data, ticid_group): ticid_group for ticid_group in ticid_split}
                         
                         for future in as_completed(futures):
                             # Handle the results as they are completed. 
@@ -385,7 +401,7 @@ class CandidateSet(object):
                 # Run on a single core
                 ticid_split = np.array_split(ticids, int(np.ceil(len(ticids)/10)))
                 for ticid_group in ticid_split:
-                    filled, fail = self.multi_sector_data(ticid_group)
+                    filled, fail = self.multi_target_data(ticid_group)
                     
                     self.sector_data = pd.concat([self.sector_data, filled])
                     self.sector_data = self.sector_data[~self.sector_data.index.duplicated(keep='last')]
@@ -393,17 +409,17 @@ class CandidateSet(object):
                     for ticid, e in fail:
                         print(f'Exception {e} occur with ticid: {ticid}')
             
-            # Save date if specified when class was initialised                                      
-            if self.save_output:
-                outfile = self.output / f'sectordata_{self.save_suffix}.csv'
-                os.makedirs(os.path.dirname(outfile), exist_ok=True)
-                self.sector_data.to_csv(outfile)
+        # Save date if specified when class was initialised                                      
+        if self.save_output:
+            outfile = self.output / f'sectordata_{self.save_suffix}.csv'
+            os.makedirs(os.path.dirname(outfile), exist_ok=True)
+            self.sector_data.to_csv(outfile)
         
         # Mark the process as completed      
         self.sectordata = True
-    
-        
-    def multi_sector_data(self, ticids):
+             
+                
+    def multi_target_data(self, ticids):
         """
         Runs the sector_data generation for a group of targets. 
         
@@ -430,8 +446,8 @@ class CandidateSet(object):
             filled = None
         
         return filled, fails
-       
-       
+    
+    
     def per_sector_data(self, ticid, initial_data):
         """
         Determine per sector transit duration, non-ingress/egress duration and depth for a single candidate by fitting a trapezium model to the TESS lightcurve 
@@ -443,27 +459,43 @@ class CandidateSet(object):
 
         # Retrieve the lc location, sectors and candidates from the provided data
         lcdir = initial_data.iloc[0].lcdir
-        sectors = initial_data.iloc[0].sectors
+        sectors = sorted(initial_data.iloc[0].sectors)
         candidates = initial_data.index.to_numpy()
+        
+        # Empty arrays to stitch the sector lcs into one
+        fluxes = np.array([])
+        times = np.array([])
+        errors = np.array([])
         
         # Load and store the detrended and normalised lightcurves per sector of observation
         lcs = {}
+        hdus = {}
+        sec_error = []
         for sec in sectors:
             lcfile = list(lcdir.glob(f'*{sec:04}*lc.fits'))[0]
-            lc = utils.load_spoc_lc(lcfile, flatten=True, sectorstart=None, transitcut=True,
-                                    tc_per=initial_data.per.values, tc_t0=initial_data.t0.values,
+            lc = utils.load_spoc_lc(lcfile, flatten=True, transitcut=True,
+                                    tc_per=initial_data.per.values, 
+                                    tc_t0=initial_data.t0.values,
                                     tc_tdur=initial_data.tdur.values)
             
             # Set the flux MAD as the error
             lc['error'] = np.full_like(lc['flux'], utils.MAD(lc['flux']))
+            sec_error.append(lc['error'][0])
             lcs[sec] = lc
+            
+            fluxes = np.concatenate([fluxes, lc['flux']])
+            times = np.concatenate([times, lc['time']])
+            errors = np.concatenate([errors, lc['error']])
 
+        lc = {'flux':fluxes,
+              'time':times,
+              'error':errors}
         sector_data = [] # List to store the results produced per candidate 
         
         # Process each candidate separately
         for cndt in candidates:
             # Create empty dataframe to store the per sector data
-            cols = ['ticid', 'candidate', 'sector', 't0','per', 'sec_tdur', 'sec_tdur23', 'sec_depth']
+            cols = ['ticid', 'candidate', 'sector', 't0', 'per', 'sec_tdur', 'sec_tdur23', 'sec_depth', 'sec_flux', 'sec_time']
             df = pd.DataFrame(index=range(len(sectors)), columns=cols)
             # Retrieve provided t0, per, tdur, depth per candidate
             cndt_t0 = initial_data.loc[cndt, 't0']
@@ -478,55 +510,18 @@ class CandidateSet(object):
             df['t0'] = cndt_t0
             df['per'] = cndt_per
             
-            # Provide a provisional period for candidates without a known period (monotransits) so that they can be examined
-            if cndt_per == 0 or np.isnan(cndt_per):
-                # Check if the recorded event falls within the observation window of the lcs
-                if (cndt_t0 > lc['time'][-1]) or (cndt_t0 < lc['time'][0]):
-                    # Set their sector data as none if not, they will not be processed
-                    df['sec_tdur'] = cndt_tdur
-                    df['tdur23'] = np.nan
-                    df['sec_depth'] = np.nan
-
-                    sector_data.append(df)
-             
-                    continue
-                else:
-                    # Set the period as the maximum time difference between the start of the transit
-                    # and the start or end of the observation window.
-                    cndt_per1 = lc['time'][-1] - (cndt_t0-cndt_tdur*0.5)
-                    cndt_per2 = cndt_t0 - (lc['time'][0]-cndt_tdur*0.5)
-                    cndt_per = np.max((cndt_per1, cndt_per2))
-            
-            # Determine the per sector transit parameters   
+            # Calculate transit parameters based on the given period
             sec_tdur = []
             sec_tdur23 = []
-            sec_depth = []    
+            sec_depth = []
+            
             for sec in sectors:
-                # Retrieve the sector lc
-                sec_lc = lcs[sec]
-                # Determine the number of observed transits in the sector
-                transits = utils.observed_transits(sec_lc['time'], cndt_t0, cndt_per, cndt_tdur)
-                # Determine the phase of the data, from -0.5 to 0.5, with the transit at 0 phase
-                phase = utils.phasefold(sec_lc['time'], cndt_per, cndt_t0 - 0.5*cndt_per) -0.5
-                # Identify the intransit data
-                intransit = np.abs(phase) < 0.5*cndt_tdur/cndt_per
+                fit_tdur, fit_tdur23, fit_depth = utils.transit_params(lcs[sec], cndt_t0, cndt_per, cndt_tdur, cndt_depth)
                 
-                # Obtain the per sector parameters, if there are transits presence and there are at least 4 intransit data points
-                if transits > 0 and sum(intransit) > 3:
-                    # Initialise and fit the trapezium transit model
-                    trapfit_initialguess = np.array([cndt_t0, cndt_tdur * 0.9 / cndt_per, cndt_tdur / cndt_per, cndt_depth*1e-6])
-                    exp_time = np.median(np.diff(sec_lc['time']))
-                    trapfit = TransitFit.TransitFit(sec_lc, trapfit_initialguess, exp_time, sfactor=7, fittype='trap', fixper=cndt_per, fixt0=cndt_t0)
-                    
-                    # Store the results
-                    sec_tdur.append(trapfit.params[1]*cndt_per)
-                    sec_tdur23.append(trapfit.params[0]*cndt_per)
-                    sec_depth.append(trapfit.params[2]*1e6)
-                else:
-                    # If no or insufficient transit data, set the sector results to nan
-                    sec_tdur.append(cndt_tdur)
-                    sec_tdur23.append(np.nan)
-                    sec_depth.append(np.nan)
+                sec_tdur.append(fit_tdur)
+                sec_tdur23.append(fit_tdur23)
+                sec_depth.append(fit_depth)
+                                           
 
             # Store the sector parameters in the dataframe
             df['sec_tdur'] = sec_tdur
@@ -538,11 +533,17 @@ class CandidateSet(object):
         
         # Concatenate the candidate datraframes in one
         sector_data = pd.concat(sector_data, ignore_index=True)
-                                                    
+        
+        # Add the median sector flux and the observation start time to the dataframe
+        for sec in sectors:
+            idx = sector_data.query(f'sector == {sec}').index
+            sector_data.loc[idx, 'sec_flux'] = lcs[sec]['median']
+            sector_data.loc[idx, 'sec_time'] = lcs[sec]['time'][0]
+                                         
         return sector_data
     
         
-    def generate_centroiddata(self, rerun=False):
+    def generate_centroiddata(self, infile=None, rerun=False):
         """
         Calculates the centroid offset in tranist for the dataset
         
@@ -554,8 +555,12 @@ class CandidateSet(object):
             raise ValueError('Run find_tic_stars first')
         
         preload = False
-        if self.load_suffix and not rerun:
-            infile = self.output / f'centroiddata_{self.load_suffix}.csv'
+        if (self.load_suffix or infile) and not rerun and not self.centroiddata:
+            if infile:
+                infile = Path(infile)
+            else:
+                infile = self.output / f'centroiddata_{self.load_suffix}.csv'
+                
             print('Loading from ' + str(infile))
             try:
                 centroid_preloaded = pd.read_csv(infile).set_index(['ticid', 'candidate', 'sector'])
@@ -597,7 +602,7 @@ class CandidateSet(object):
         if num_targets > 0:
             print(f'Running centroid data retrieval for {num_targets} targets')
             
-            if self.multiprocessing > 1 and num_targets > 5:
+            if self.multiprocessing > 1 and num_targets > 1:
                 # Run multi-processed if requested at class initialisation and there are enough targets to be worth it
                 if num_targets < self.multiprocessing:
                     # If there are less targets than the specified number of cores, set the number of workers accordingly
@@ -679,7 +684,7 @@ class CandidateSet(object):
         
         return filled, fails
     
-                             
+                          
     def observed_centroid_offset(self, ticid, cndt, sec):
         """
         Determine per sector centroid offset for a candidate
@@ -708,7 +713,7 @@ class CandidateSet(object):
         # CAM and CCD retrieve for diagnostic purposes when displaying the results.
         time, data_X, data_Y, cent_flag, cam, ccd = utils.load_spoc_centroid(lc_file,
                                                                                 flatten=True, cut_outliers=5, trim=True,
-                                                                                sectorstart=None, transitcut=False,
+                                                                                transitcut=False,
                                                                                 tc_per=tc_per,
                                                                                 tc_t0=tc_t0,
                                                                                 tc_tdur=tc_tdur)
@@ -775,25 +780,44 @@ class CandidateSet(object):
                 source_obj.scc.loc[sec] = [cam, ccd]
                 
                 # Create temporary copy of the nearby data
-                data = source_obj.nearby_data.copy()
+                temp_data = source_obj.nearby_data.copy()
+                
+                # Compare the estimated and observed flux of the target in the sector to correct for discrepancies 
+                estimated_flux = temp_data.loc[ticid, 'Flux']
+                dummy_cndt = self.data.loc[ticid].index[0]
+                observed_flux = self.sector_data.loc[(ticid, dummy_cndt, sec), 'sec_flux']
+                cor_factor = observed_flux/estimated_flux
+                temp_data['Flux'] *= cor_factor
+                
+                # Store the correction factor for later use
+                source_obj.cor_factor[sec] = cor_factor
+                
+                # Account for proper motion
+                obs_time = self.sector_data.loc[(ticid, dummy_cndt, sec), 'sec_time']
+                cor_ra, cor_dec = utils.gaia_pm_corr(obs_time, temp_data['ra'].values, temp_data['dec'].values, temp_data['pmra'].values, temp_data['pmdec'].values)
+                temp_data['ra'] = cor_ra
+                temp_data['dec'] = cor_dec
                 
                 # Use the retrieved WCS to convert the ra and dec of the nearby sources into pixel locations
-                data['x'], data['y'] = wcs.all_world2pix(data.ra, data.dec, 0)
+                temp_data['x'], temp_data['y'] = wcs.all_world2pix(temp_data.ra, temp_data.dec, 0)
                 
                 # Test if target position from wcs is correctly in the aperture. Catch wcs errors
-                in_ap = utils.test_target_aperture(data.loc[ticid].x, data.loc[ticid].y, aperture_mask)
+                in_ap = utils.test_target_aperture(temp_data.loc[ticid].x, temp_data.loc[ticid].y, aperture_mask)
                 
                 if in_ap:
                     # Calculate the flux fractions and the total flux in aperture, by modelling the observation using the TESS PRF
-                    fractions, total_flux = utils.calc_flux_fractions(sec, cam, ccd, origin, data.x.values, data.y.values, data.Flux.values, aperture_mask)
+                    prfs = utils.sources_prf(sec, cam, ccd, origin, temp_data['x'].values, temp_data['y'].values, aperture_mask.shape)
+                    fractions, total_flux = utils.flux_fraction_in_ap(temp_data.Flux.values, aperture_mask, prfs)
                 else:
                     # Set the fractions to nan, to effectively ignore this sector
-                    fractions = np.zeros(len(data))
+                    prfs = None
+                    fractions = np.zeros(len(temp_data))
                     fractions[:] = np.nan
                     
                     total_flux = np.nan
                 
-                # Store the fractions, the modeled total flux and the Tmag equivalent of the flux in the aperture
+                # Store the model prfs, fractions, the modeled total flux and the Tmag equivalent of the flux in the aperture
+                source_obj.prfs[sec] = prfs
                 source_obj.nearby_fractions[f'S{sec}'] = fractions 
                 source_obj.totalflux[sec] = total_flux
                 source_obj.totalmag_equivalent[sec] = 10 - 2.5*np.log10(total_flux/15000)
@@ -913,36 +937,26 @@ class CandidateSet(object):
                 sectors_out = sectors
             
             for sec in sectors_out:
-                # Retrieve the information stored before
-                cam, ccd = source_obj.scc.loc[sec]
-                origin = source_obj.origin[sec]
-                wcs = source_obj.wcs[sec]
-                centroid_mask = source_obj.centroid_mask[sec]
-                
-                # Find the pixel positions of the nearby sources
-                data = source_obj.nearby_data.copy()
-                data['x'], data['y'] = wcs.all_world2pix(data.ra, data.dec, 0)
-                
-                # Check if the target lies in the aperture. Catches wcs erros.
-                in_ap = utils.test_target_aperture(data.iloc[0].x, data.iloc[0].y, centroid_mask)
-                
-                if in_ap:
-                    # Determine the model fraction of flux from each source in each pixel of the aperture and store them
-                    fractions = utils.prf_fractions(sec, cam, ccd, origin, data.x.values, data.y.values, centroid_mask)
-                    source_obj.cent_fractions[sec] = fractions
-                    # Determine the model out of transit centroid
-                    cent_x, cent_y = utils.model_centroid(centroid_mask, data.Flux.values, fractions)
+                # Retrieve the model prfs stored before
+                prfs = source_obj.prfs[sec]
+                if prfs is not None:
+                    temp_data = source_obj.nearby_data[['Flux']].copy()
+                    cor_factor = source_obj.cor_factor[sec]
+                    temp_data['Flux'] *= cor_factor
+                    
+                    centroid_mask = source_obj.centroid_mask[sec]
+                    
+                    cent_x, cent_y = utils.model_centroid(centroid_mask, temp_data.Flux.values, prfs)
                 else:
-                    # Set the centroid to nan
                     cent_x, cent_y = np.nan, np.nan
-                
+                                    
                 # Store the out of transit centroid for each sector
                 source_obj.cent_out.loc[sec] = cent_x, cent_y
 
             # Construct a dataframe to store the model centroid in transit per sector for the event on the target and on the nearby sources
             cent_in = pd.DataFrame(data=0, 
                                    index=pd.MultiIndex.from_product([source_obj.nearby_data.index, target_data.index, sectors], names=['ticid', 'candidate', 'sector']), 
-                                   columns=['X', 'Y', 'X+', 'Y+', 'X-', 'Y-'])
+                                   columns=['X', 'Y'])
             if not rerun:
                 # Merged with existing in transit model centroids
                 cent_in = pd.concat([cent_in, source_obj.cent_in])
@@ -959,15 +973,12 @@ class CandidateSet(object):
                         source_obj.cent_in.loc[cent_in.query(f'sector == {sec}').index] = np.nan
                         continue
                         
-                    # Retrieve the sector pixel information
-                    cam, ccd = source_obj.scc.loc[sec]
-                    origin = source_obj.origin[sec]
-                    wcs = source_obj.wcs[sec]
+                    # Retrieve the sector information
+                    temp_data = source_obj.nearby_data[['Flux']].copy()
+                    cor_factor = source_obj.cor_factor[sec]
+                    temp_data['Flux'] *= cor_factor
                     centroid_mask = source_obj.centroid_mask[sec]
-                    
-                    # Pixel location of sources
-                    data = source_obj.nearby_data.copy()
-                    data['x'], data['y'] = wcs.all_world2pix(data.ra, data.dec, 0)
+                    prfs = source_obj.prfs[sec]
                     
                     # Process each candidate individually
                     for cndt in to_fill.query(f'sector == {sec}').index.unique('candidate'):
@@ -975,55 +986,46 @@ class CandidateSet(object):
                         if self.centroid.loc[targetid, cndt, sec].isna().any():
                             source_obj.cent_in.loc[cent_in.query(f'candidate == {cndt} & sector == {sec}').index] = np.nan
                             continue
+                                                                    
+                        # Check if the candidate depth for the sector is nan
+                        cndt_depth = source_obj.nearby_depths.loc[(targetid, cndt), f'S{sec}']
+                        if np.isnan(cndt_depth):
+                            source_obj.cent_in.loc[cent_in.query(f'candidate == {cndt} & sector == {sec}').index] = np.nan
+                            continue
                         
                         # Determine the model in transit centroid for the target and the nearby sources
                         for ticid in source_obj.nearby_data.index.unique('ticid'):
                             # Retrieve the mean depth for the source
                             depth = source_obj.nearby_depths.loc[(ticid, cndt), f'Mean']*1e-6
+                            obj_type = source_obj.nearby_data.loc[ticid, 'objType']
 
                             # Check depth suitability
                             if depth == 0.0 or np.isnan(depth):
                                 source_obj.cent_in.loc[ticid, cndt, sec] = np.nan
                             elif depth*0.9 > max_eclipsedepth:
                                 source_obj.cent_in.loc[ticid, cndt, sec] = np.nan
+                            elif obj_type != 'STAR':
+                                source_obj.cent_in.loc[ticid, cndt, sec] = np.nan
                             else:
-                                # Retrieve the prf fractions
-                                flux_fractions = source_obj.cent_fractions[sec]
                                 # Retrieve the fluxes
-                                fluxes = data['Flux'].copy()
+                                fluxes = temp_data['Flux'].copy()
                                 
                                 # Scale the flux of the source by the depth
                                 depth_scale = np.min((depth, 1.0))
                                 fluxes.loc[ticid] *= (1-depth_scale) 
                                 
                                 # Determine in transit model centroid
-                                X, Y = utils.model_centroid(centroid_mask, fluxes.values, flux_fractions)
+                                X, Y = utils.model_centroid(centroid_mask, fluxes.values, prfs)
                                 
-                                # Enforce a 10% baseline error on the depth and determine the model centroid again
-                                fluxes = data['Flux'].copy()
-                                depth_scale = np.min((depth*1.1, 1.0))
-                                fluxes.loc[ticid] *= (1-depth_scale) 
-                                
-                                X_plus, Y_plus = utils.model_centroid(centroid_mask, fluxes.values, flux_fractions)
-                                
-                                fluxes = data['Flux'].copy()
-                                fluxes.loc[ticid] *= (1-depth*0.9) 
-                                
-                                X_minus, Y_minus = utils.model_centroid(centroid_mask, fluxes.values, flux_fractions)
-
                                 # Store the model centroids
-                                source_obj.cent_in.loc[ticid, cndt, sec] = [X, Y, X_plus, Y_plus, X_minus, Y_minus]
+                                source_obj.cent_in.loc[ticid, cndt, sec] = [X, Y]
 
                 # Determine the model centroid offset and the error for all candidates and sources
                 model_offset = pd.DataFrame()
                 model_offset['X_diff'] = source_obj.cent_in['X'] - source_obj.cent_out['X']
                 model_offset['Y_diff'] = source_obj.cent_in['Y'] - source_obj.cent_out['Y']
-                model_offset['X_err1'] = source_obj.cent_in['X'] - source_obj.cent_in['X-']
-                model_offset['X_err2'] = source_obj.cent_in['X+'] - source_obj.cent_in['X']
-                model_offset['Y_err1'] = source_obj.cent_in['Y'] - source_obj.cent_in['Y-']
-                model_offset['Y_err2'] = source_obj.cent_in['Y+'] - source_obj.cent_in['Y']
-                model_offset['X_err'] = model_offset[['X_err1', 'X_err2']].max(axis=1)
-                model_offset['Y_err'] = model_offset[['Y_err1', 'Y_err2']].max(axis=1)
+                model_offset['X_err'] = model_offset['X_diff']*0.1
+                model_offset['Y_err'] = model_offset['Y_diff']*0.1
                 
                 # Store the model centroid offset and errors                
                 source_obj.model_centroid = model_offset[['X_diff', 'X_err', 'Y_diff', 'Y_err']]
@@ -1124,43 +1126,48 @@ class CandidateSet(object):
         
         self.assessment = self.assessment[~self.assessment.index.duplicated(keep='last')]  
         self.assessment.sort_values('Possible', ascending=False)
-        
-        # Output the probabilities
-        outfile = self.output / f'Probabilities_{self.save_suffix}.csv'
-        self.probabilities.to_csv(outfile)
-        
-        # Output the assessment
-        outfile = self.output / f'Assessment_{self.save_suffix}.csv'
-        self.assessment.to_csv(outfile)
+                    
+        if self.save_output:  
+            # Output the probabilities
+            outfile = self.output / f'Probabilities_{self.save_suffix}.csv'
+            self.probabilities.to_csv(outfile)
             
-        # Save sources to be reused
-        if self.save_output:
+            # Output the assessment
+            outfile = self.output / f'Assessment_{self.save_suffix}.csv'
+            self.assessment.to_csv(outfile)
+            
+            # Save the sources to be reused
             outfile = self.output / f'sources_{self.save_suffix}.pkl'
             with open(outfile, 'wb') as f:
                 pickle.dump(self.sources, f, protocol=5)
 
 class Source(object):
 
-    def __init__(self, tic, coords=(), mags={}):
+    def __init__(self, tic, coords=(),  pm=(), mags={}, star_rad=None, star_mass=None, teff=None):
         """
         Datastore for a flux source
         """
         self.TIC = tic # Target TIC ID
         self.coords = coords # Target ra and dec
+        self.pm = pm # Target proper motion
         self.mags = mags # Target TESS, V and GAIA magnitudes
+        self.star_rad = star_rad # Target Stellar Radius
+        self.star_mass = star_mass # Target Stellar Mass
+        self.teff = teff # Target effective temperature
         self.scc = pd.DataFrame(columns=['sector', 'cam', 'ccd']).set_index('sector') # TESS sector/cam/ccd on which the target was observed
         self.wcs = {} # Per sector WCS 
         self.origin = {} # Per sector target pixel origin location
         self.aperture_mask = {} # Per sector pixels used for the aperture
         self.centroid_mask = {} # Per sector pixels used to determine the photometric centroid
         self.nearby_data = None # Data for the target's nearby sources (includes the target)
-        self.nearby_fractions = None 
-        self.nearby_depths = pd.DataFrame()
-        self.totalflux = {}
-        self.totalmag_equivalent = {}
-        self.cent_fractions = {}
-        self.cent_out = pd.DataFrame(columns=['sector', 'X', 'Y']).set_index('sector') # Model centroid out-of-transit
-        self.cent_in = pd.DataFrame() # Model centroid in-transit 
-        self.model_centroid = pd.DataFrame()
-        self.prob_centroid = pd.DataFrame()
-        self.nearby_assessment = None
+        self.cor_factor = {} # Correction fraction to match model and observed target flux
+        self.nearby_fractions = None # Flux fraction contribution of nearby stars in aperture
+        self.nearby_depths = pd.DataFrame() # Implied eclipse depth for target's nearby sources
+        self.totalflux = {} # Model total flux in aperture
+        self.totalmag_equivalent = {} # Model magnitude equivalent of total flux in aperture
+        self.prfs = {} # Sector Pixel-Response Function
+        self.cent_out = pd.DataFrame(columns=['sector', 'X', 'Y']).set_index('sector') # Model centroid out of transit
+        self.cent_in = pd.DataFrame() # Model centroid in-transit
+        self.model_centroid = pd.DataFrame() # Model centroid offset
+        self.prob_centroid = pd.DataFrame() # Positional Probability
+        self.nearby_assessment = None # Assessment of nearby targets
