@@ -954,7 +954,7 @@ class CandidateSet(object):
                 source_obj.cent_out.loc[sec] = cent_x, cent_y
 
             # Construct a dataframe to store the model centroid in transit per sector for the event on the target and on the nearby sources
-            cent_in = pd.DataFrame(data=0, 
+            cent_in = pd.DataFrame(data=0.0, 
                                    index=pd.MultiIndex.from_product([source_obj.nearby_data.index, target_data.index, sectors], names=['ticid', 'candidate', 'sector']), 
                                    columns=['X', 'Y'])
             if not rerun:
@@ -1040,7 +1040,7 @@ class CandidateSet(object):
                                                                                                             x['X_err'], x['Y_err']), axis=1)
                 
                 # Compute the sum of the probabilities for all candidates per sector
-                model_offset = model_offset.join(model_offset.groupby(['candidate', 'sector']).agg(Prob_Sum=('Probability', sum)), on=['candidate', 'sector'])
+                model_offset = model_offset.join(model_offset.groupby(['candidate', 'sector']).agg(Prob_Sum=('Probability', 'sum')), on=['candidate', 'sector'])
                                 
                 # Compute the normalised probability for each candidate per sector
                 model_offset['Norm_Probability'] = model_offset['Probability'] / model_offset['Prob_Sum']
