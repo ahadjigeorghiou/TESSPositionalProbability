@@ -31,7 +31,8 @@ matplotlib
   - transit duration (days)
   - transit depth (ppm)
 - Add the SPOC lightcurve files for your targets in folders with their respective TIC ID number inside the Lightcurve folder, similar to the provided example data.
-- Modify the PositionalProbability.py script, replacing 'example.csv' with your input filename and providing a suitable save_suffix.
+- Modify the PositionalProbability.py script, replacing 'example.csv' with your input filename.
+- Set the 'save_output' parameter to True to output the probabilities in a csv file or False to print the probabilities in the command line. Provide a suitable save_suffix if saving the output.
 - Run PositionalProbability.py
 
-A detailed explanation of the user functions and their parameters can be found in CandidateSet.py inside the CandidateSet folder.
+A detailed explanation of the user functions and their parameters can be found in CandidateSet.py inside the CandidateSet folder. 
