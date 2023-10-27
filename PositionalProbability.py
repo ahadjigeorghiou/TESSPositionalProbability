@@ -1,7 +1,7 @@
 from CandidateSet import CandidateSet as cs
 
 # Specify input, output and execution parameters. Load input data and initialize.
-cset = cs.CandidateSet('example.csv', save_output=True, save_suffix='_Example', multiprocessing=0)
+cset = cs.CandidateSet('example.csv', save_output=True, save_suffix='Example', multiprocessing=0)
 
 # Retrieve required data for the target stars from the TIC, including the nearby sources.
 cset.generate_sources(infile=None)
@@ -26,3 +26,8 @@ cset.estimate_nearby_depths()
 # Generate positional probabilities
 cset.generate_probabilities()
 
+# Print positional probabilities with 4 decimal precision if output is not saved:
+if cset.save_output is False:
+    import pandas as pd
+    with pd.option_context('display.float_format', '{:,.4f}'.format):
+        print(cset.probabilities[['PositionalProbability', 'Disposition']])

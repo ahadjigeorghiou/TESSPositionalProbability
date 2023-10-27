@@ -25,7 +25,7 @@ class CandidateSet(object):
         per_lim - set maximum period limit for candidates to be processed. Candidates with period longer than maximum will be skipped.
         depth_lim - set minimum depth limit for candidates. Candidates with depth less than the minimum will be skipped.
         multiprocessing - set maximum number of workers (set 0 for no multiprocessing and 1 to use all available processors)
-        save_output - True/False. Affects all data generation except for the probability generation, which always saves the output.
+        save_output - True/False or 'full'. True outputs only a csv file with the Positional Probabilities. 'full' enables output for all data generation functions and extends the probability output.
         save_suffix - Suffix for the filenames of all saved data.
         load_suffix - Suffix for loading previously saved data.
         plot_centroid - True/False. Create plots when fitting the trapezium transit model to the centroid data.
@@ -59,17 +59,20 @@ class CandidateSet(object):
             
         self.multiprocessing = multiprocessing
         
+        if isinstance(save_output, str):
+            save_output = save_output.lower()
+            
         self.save_output = save_output
         
-        if save_output:   
+        if save_output is not False:   
             if save_suffix:
                 self.save_suffix = save_suffix
             else:
                 self.save_suffix = datetime.today().strftime('%d%m%Y_%H%M%S')
         
-        # Define and create output directory if it does not exist       
-        self.output = Path(__file__).resolve().parents[1] / 'Output'
-        self.output.mkdir(exist_ok=True)
+            # Define and create output directory if it does not exist       
+            self.output = Path(__file__).resolve().parents[1] / 'Output'
+            self.output.mkdir(exist_ok=True)
         
         self.load_suffix = load_suffix
         
@@ -77,8 +80,8 @@ class CandidateSet(object):
         # Define and create the directory to save the centroid plots. 
         # Individual folders for each target will be created later within this directory
         if self.plot_centroid:
-            outfile = self.output / 'Plots'
-            outfile.mkdir(exist_ok=True)
+            outfile = Path(__file__).resolve().parents[1] / 'Output' / 'Plots'
+            outfile.mkdir(exist_ok=True, parents=True)
         
     
     def generate_sources(self, infile=None, rerun=False):
@@ -213,7 +216,7 @@ class CandidateSet(object):
                 self.find_stars = True
 
         # Save output to be reused if specified when class was initialised
-        if self.save_output:
+        if self.save_output == 'full':
             outfile = self.output / f'sources_{self.save_suffix}.pkl'
             with open(outfile, 'wb') as f:
                 pickle.dump(self.sources, f, protocol=5)
@@ -409,10 +412,9 @@ class CandidateSet(object):
                     for ticid, e in fail:
                         print(f'Exception {e} occur with ticid: {ticid}')
             
-        # Save date if specified when class was initialised                                      
-        if self.save_output:
+        # Save data if specified when class was initialised                                      
+        if self.save_output == 'full':
             outfile = self.output / f'sectordata_{self.save_suffix}.csv'
-            os.makedirs(os.path.dirname(outfile), exist_ok=True)
             self.sector_data.to_csv(outfile)
         
         # Mark the process as completed      
@@ -649,10 +651,9 @@ class CandidateSet(object):
                 for fail in fails:
                     print(f'Exception {fail[1]} occur for index: {fail[0]}')
         
-        # Save date if specified when class was initialised                           
-        if self.save_output:
+        # Save data if specified when class was initialised                           
+        if self.save_output == 'full':
             outfile = self.output / f'centroiddata_{self.save_suffix}.csv'
-            os.makedirs(os.path.dirname(outfile), exist_ok=True)
             self.centroid.to_csv(outfile)
         
         # Mark the process as completed         
@@ -822,8 +823,8 @@ class CandidateSet(object):
                 source_obj.totalflux[sec] = total_flux
                 source_obj.totalmag_equivalent[sec] = 10 - 2.5*np.log10(total_flux/15000)
                      
-        # Save output to be reused
-        if self.save_output:
+        # Save output if specified when class was initialised
+        if self.save_output == 'full':
             outfile = self.output / f'sources_{self.save_suffix}.pkl'
             with open(outfile, 'wb') as f:
                 pickle.dump(self.sources, f, protocol=5)
@@ -900,7 +901,13 @@ class CandidateSet(object):
             # For nearby sources where the flux fraction in aperture was 0 for all sectors, set the mean to 0.
             zero_idx = source_obj.nearby_fractions[(source_obj.nearby_fractions == 0).all(axis=1)].index
             source_obj.nearby_depths.loc[zero_idx, 'Mean'] = 0
-            
+        
+        # Save output if specified when class was initialised
+        if self.save_output == 'full':
+            outfile = self.output / f'sources_{self.save_suffix}.pkl'
+            with open(outfile, 'wb') as f:
+                pickle.dump(self.sources, f, protocol=5)   
+        
         # Mark the process as completed   
         self.estimate_depths = True
     
@@ -922,7 +929,9 @@ class CandidateSet(object):
         # Check if nearby depths have been determined. Raise an error if not.
         if not self.estimate_depths:
             raise ValueError('Run nearby_flux_fractions first!')
-         
+        
+        print(f'Generating Positional Probabilities')
+        
         for targetid in self.sources.keys():
             # Retrieve the target data and source object
             target_data = self.data.loc[targetid]
@@ -1126,8 +1135,13 @@ class CandidateSet(object):
         
         self.assessment = self.assessment[~self.assessment.index.duplicated(keep='last')]  
         self.assessment.sort_values('Possible', ascending=False)
-                    
-        if self.save_output:  
+        
+        print('Positional Probabilities generated!')
+        
+        self.probabilities.rename(columns={'PositionalProb':'PositionalProbability',
+                                           'disp':'Disposition'}, inplace=True)
+                 
+        if self.save_output == 'full':  
             # Output the probabilities
             outfile = self.output / f'Probabilities_{self.save_suffix}.csv'
             self.probabilities.to_csv(outfile)
@@ -1140,6 +1154,11 @@ class CandidateSet(object):
             outfile = self.output / f'sources_{self.save_suffix}.pkl'
             with open(outfile, 'wb') as f:
                 pickle.dump(self.sources, f, protocol=5)
+        elif self.save_output is True:
+            # Output just the Positional Probabilities
+            outfile = self.output / f'Probabilities_{self.save_suffix}.csv'
+            self.probabilities[['PositionalProbability', 'Disposition']].to_csv(outfile)
+            
 
 class Source(object):
 
