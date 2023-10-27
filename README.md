@@ -27,9 +27,9 @@ matplotlib
   - TIC ID of target star
   - Candidate Identification (usually TOI number)
   - Period (days)
-  - transit epoch (BTJD)
-  - transit duration (days)
-  - transit depth (ppm)
+  - Transit Epoch (BTJD)
+  - Transit Duration (days)
+  - Transit Depth (ppm)
 - Add the SPOC lightcurve files for your targets in folders with their respective TIC ID number inside the Lightcurve folder, similar to the provided example data.
 - Modify the PositionalProbability.py script, replacing 'example.csv' with your input filename.
 - Set the 'save_output' parameter to True to output the probabilities in a csv file or False to print the probabilities in the command line. Provide a suitable save_suffix if saving the output.
