@@ -16,7 +16,7 @@ matplotlib
 ## Installation:
 - Clone or download the repository.
 - Set up a python environment based on the requirements. 
-- The repository includes an example input and data. Run:
+- The repository includes an example input file and data. Run:
 
   ```python PositionalProbability.py```
 
