@@ -932,6 +932,10 @@ class CandidateSet(object):
         
         print(f'Generating Positional Probabilities')
         
+        if rerun:
+            self.probabilities = pd.DataFrame() # Positional Probabilities
+            self.assessment = pd.DataFrame() # Assessment for all nearby sources
+        
         for targetid in self.sources.keys():
             # Retrieve the target data and source object
             target_data = self.data.loc[targetid]
