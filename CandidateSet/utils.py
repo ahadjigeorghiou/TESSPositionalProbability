@@ -662,6 +662,9 @@ def calc_centroid_probability(cent_x, cent_y, cent_x_err, cent_y_err, diff_x, di
     X_err = np.sqrt(cent_x_err ** 2 + diff_x_err ** 2)
     Y_err = np.sqrt(cent_y_err ** 2 + diff_y_err ** 2)
     
+    if np.isnan(X_err) or np.isnan(Y_err):
+        return np.nan
+    
     from scipy import spatial
     # get mahalanobis distance?
     cov = np.array([[X_err ** 2, 0], [0, Y_err ** 2]])
